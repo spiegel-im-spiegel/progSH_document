@@ -1,0 +1,900 @@
+\documentclass[a4j,10pt,fleqn]{jsarticle}
+\usepackage{atbegshi}
+\AtBeginShipoutFirst{\special{pdf:tounicode 90ms-RKSJ-UCS2}}
+\usepackage{amssymb,txfonts,times}
+\usepackage{ascmac}
+%\usepackage{okumacro}
+\usepackage{longtable}
+\usepackage[dvipdfmx]{graphicx,xcolor}
+\usepackage[dvipdfmx]{hyperref}
+
+%%%
+%この文書の組版は奥村晴彦さんの「pLaTeX2e 新ドキュメントクラス」を用いています。
+%
+%  http://www.matsusaka-u.ac.jp/~okumura/jsclasses/
+%
+
+\title{\textbf{SHマイコン Cプログラミング虎の巻}}
+\author{荒川靖弘}
+\date{1998年 9月3日}
+
+\hypersetup{% Setup for hyperref packeage
+    colorlinks=true,
+    pdftitle=SHマイコン,
+    pdfsubject=Cプログラミング虎の巻,
+    pdfauthor=荒川 靖弘,
+    pdfkeywords=SuperH C}
+
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+
+
+\clearpage
+\section{はじめに}
+
+本レポートは，機器組み込み用シングルチップRISCマイコン日立SuperH RISC engineファミリ
+（以降SHマイコンと略称します）のプログラミングを行う際のコーディングテクニック等について
+紹介します。
+マイコンプログラムに慣れている方には「釈迦に説法」でしょうが，
+筆者なりにSHマイコン用のプログラムを作成する上での注意点をまとめてみました。
+
+今回使用したコンパイラは(株)日立マイコンシステム製の以下のコンパイラです。
+\begin{quote}\begin{tabular}{rl}
+\textbf{コンパイラ：}  & SH SERIES C Compiler Ver. 4.1B \\
+\textbf{アセンブラ：}  & SH SERIES ASSEMBLER Ver. 3.1A \\
+\textbf{リンカ：}      & H SERIES LINKAGE EDITOR Ver. 5.3B \\
+\end{tabular}\end{quote}
+
+
+\section{まずは基本中の基本}
+
+\subsection{コーディングスタイル}
+
+今回使用したコンパイラは，
+最適化についてはかなり強力な機能を持っているようです。
+しかし，その分ソースコードの構文解釈がデリケートになっています。
+
+最適化については後述しますが，
+ひとまずコーディングスタイルについては ANSI C の標準的な
+スタイルを守るようにするべきです。
+特にプロトタイピングを行わないソースは
+最適化機能に大きな支障をきたす場合があります。
+
+算術式や論理式には少し注意してください。
+現在のバージョンではほとんど直っているようですが，
+SHCコンパイラにはこのあたりにまだバグが隠れている場合があります。
+怪しいと思ったら，式を分離するか括弧を付けて優先順位を明示することによって
+改善することがあります。
+
+
+\subsection{ベクタテーブルはC言語で書くべきか}
+
+実はSHCコンパイラではCでベクタテーブルを比較的簡単に記述することができます。
+Hシリーズ，SHシリーズのマイコンはプログラムで定義しない場合の
+「デフォルトの動作」が厳密に決まっていて，
+ハードウェアマニュアル等にも明記してあるので，
+割と手抜きのコーディングでも許されてしまいます。
+
+しかしブートストラップルーチンなどはアセンブラでしか書けない部分というのもあるので（特に初期化部分），
+C言語で記述できそうなプログラムでも
+敢えてアセンブラソースの部分を残しておくというのは
+意味ある事のように思えます。
+
+
+\section{パイプライン基礎講座}
+
+\subsection{パイプラインについて}
+
+この章ではCのコーディングの話からはずれます。
+しかしSHマイコンの「癖」について割と踏み込んで述べているつもりですので
+是非読んでみてください。
+また文献\cite{SH1SH2:MANUAL:Program}\,などでも詳しく紹介されていますので，
+こちらもぜひ参考にしてください。
+
+SHマイコンは命令の実行に「パイプライン」と呼ばれる機能を使っています。
+パイプラインとは，
+簡単にいえば複数の命令を同時に実行することにより
+1命令あたりの実行期間を見かけ上短くする機能です。
+
+通常1つの命令を実行する場合，以下の5つの状態が発生します。
+\begin{quote}\begin{tabular}{rp{26zw}}
+\textbf{命令フェッチ（IF）：}   & メモリから命令を取り込みます。 \\
+\textbf{命令デコード（ID）：}   & 取り込んだ命令を解読します。 \\
+\textbf{命令実行（EX）：}       & 解読結果に従い，データ演算やアドレス計算を行います。 \\
+\textbf{メモリアクセス（MA）：} & メモリのデータアクセスを行います。
+                                    （メモリアクセスを伴う命令のみで発生します。） \\
+\textbf{ライトバック（WB）：}   & メモリアクセスした結果（データ）をレジスタに戻します。
+                                    （メモリアクセスを伴う命令のみで発生します。） \\
+\end{tabular}\end{quote}
+それぞれの状態をここでは「ステージ」と呼びます。
+各ステージは命令の実行とともに以下のように流れていき，パイプラインを構成します。
+
+\begin{center}\begin{tabular}{r|c|c|c|c|c|c|c|c|c|cl}
+ & $\leftrightarrow$ & $\leftrightarrow$ & $\leftrightarrow$ & $\leftrightarrow$ & $\leftrightarrow$
+ & $\leftrightarrow$ & $\leftrightarrow$ & $\leftrightarrow$ & $\leftrightarrow$ & $\leftrightarrow$ & ：スロット \\
+命令1 & IF & ID & EX & MA & WB &    &    &    &    &    & \\
+命令2 &    & IF & ID & EX & MA & WB &    &    &    &    & \\
+命令3 &    &    & IF & ID & EX & MA & WB &    &    &    & \\
+命令4 &    &    &    & IF & ID & EX & MA & WB &    &    & \\
+命令5 &    &    &    &    & IF & ID & EX & MA & WB &    & \\
+命令6 &    &    &    &    &    & IF & ID & EX & MA & WB & \\
+\end{tabular}\end{center}
+
+ある瞬間では最大5つの命令が実行されていることがおわかりでしょうか。
+MA, WB ステージは命令によっては発生しないこともあります。
+
+ある1つのステージが実行される期間を「スロット」と呼びます。
+命令の各ステージは必ず1スロットで実行されます。
+通常1スロット内で2つ以上のステージを実行することはありません。
+ただし，WBステージはMAの直後に実行されますので，
+状況によってはMAステージとWBステージが同一スロットで実行される場合もあります。
+
+H/W条件やステージの競合などによって
+パイプラインが乱れることもあります。
+次節でパイプラインが乱れる原因について説明します。
+
+
+\subsection{パイプラインが乱れる原因}
+
+パイプラインが乱れる原因としては以下のものが考えられます。
+
+\begin{enumerate}
+
+\item ステージの実行にかかるステート数（システムクロックサイクル数）が
+    1つのスロット内で同じでない場合，パイプラインの流れは以下のようになります。
+
+    \begin{center}\begin{tabular}{r|cc|cc|c|ccc|c|c}
+    命令1 & IF & IF & ID & -- & EX & MA & MA & MA & WB &    \\
+    命令2 &    &    & IF & IF & ID & EX & -- & -- & MA & WB \\
+    \end{tabular}\end{center}
+
+    これは，IFに2ステート，MAに3ステートかかった場合の様子です。
+    ``--'' はストールしている状態を表しています。
+    IDやEX,WBステージは常に1ステートで実行されますが，
+    メモリアクセスをともなうIFやMAステージの場合，
+    余分に実行時間がかかる場合があります。
+
+\item IFステージとMAステージが同一スロットで操作しようとすると，
+    同時にメモリアクセスを行うことはできないので，
+    以下のように競合状態が発生します。
+    \begin{center}\begin{tabular}{r|c|c|c|cc|cc|c|cc}
+    命令1 & IF & ID & EX & MA & WB &    &    &    &    &    \\
+    命令2 &    & IF & ID & -- & EX & MA & WB &    &    &    \\
+    命令3 &    &    & IF & -- & ID & -- & EX &    &    &    \\
+    命令4 &    &    &    &    & IF & -- & ID & EX &    &    \\
+    命令5 &    &    &    &    &    &    & IF & ID & EX &    \\
+    \end{tabular}\end{center}
+    この例では，命令1と命令4，命令2と命令5が競合しています。
+    この場合競合が発生したスロットはスプリットし，
+    MAステージが優先的に実行されその他のステージはその後に実行されます。
+    （WBステージはMAステージの直後に実行されるので，
+    MA,WBステージは同一スロットで実行されます。）
+    \par ただし，命令が内蔵ROM/RAMまたは内臓キャッシュに配置されている場合は
+    更に異なる動作をします。
+    これらのメモリに命令が配置されている場合は，
+    1回の命令フェッチで2命令持ってくることができるので，
+    次命令のIFステージではバスサイクルが発生しないことになります。
+    この場合は下に示すようにスプリットは発生しません。
+    （命令1と命令4は競合しない）
+    \begin{center}\begin{tabular}{r|c|c|c|c|cc|c|ccc}
+    命令1 & IF & ID & EX & MA & WB &    &    &    &    &    \\
+    命令2 &    & if & ID & EX & MA & WB &    &    &    &    \\
+    命令3 &    &    & IF & ID & -- & EX &    &    &    &    \\
+    命令4 &    &    &    & if & -- & ID & EX &    &    &    \\
+    命令5 &    &    &    &    &    & IF & ID & EX &    &    \\
+    \end{tabular}\end{center}
+
+\item メモリロード命令の直後にディスティネーションレジスタを使う命令を実行しようとすると
+    以下のようにスプリットが発生します。
+    \begin{center}\begin{tabular}{l|c|c|c|cc|ccccc}
+    命令1（\texttt{MOV.W @R0,R1}） & IF & ID & EX & MA & WB &    &    &    &    &    \\
+    命令2（\texttt{ADD R1,R2}）    &    & IF & ID & -- & EX &    &    &    &    &    \\
+    \end{tabular}\end{center}
+    これは命令1のWBステージが来る前に命令2のEXステージを実行しようとしたために発生します。
+
+\end{enumerate}
+
+
+\subsection{パイプラインを乱さないようにするには} \label{sec:pipeline}
+
+パイプラインをなるべく乱さないようにするためには，
+コーディングの際に以下の点に気をつけます。
+
+\begin{enumerate}
+
+\item 命令を配置するメモリエリアをなるべく内蔵ROM/RAMにします。
+    または内臓キャッシュを活用してメモリアクセスの効率を上げます。
+
+\item MAを持つ命令（ロード命令など）を
+    できるだけロングワード境界にのみ配置するようにします。
+
+\item メモリからのロード命令の直後の命令には，
+    ロード命令のディスティネーションレジスタと同じレジスタを使わない命令を配置します。
+
+\item 乗算器を使う命令が連続しないように配置します。
+    乗算器からの結果の取り出しのためのMACH，MACLレジスタへのアクセスも
+    乗算器を使う命令に連続しないように配置します。
+
+\end{enumerate}
+
+しかし，実際問題C言語レベルでこれらの調整を行うのはほとんど不可能です。
+そこで，SHCコンパイラは上記の調整を自動的に行うオプションを備えています。
+
+
+\section{コンパイル時の最適化は必要か} \label{sec:optimize}
+
+\subsection{SHCコンパイラの最適化機能}
+
+SHCコンパイラの最適化機能はかなり強力です。
+最適化の主な機能について以下に挙げてみます。
+\begin{itemize}
+\item Auto変数のレジスタへの自動/最適割り付け
+\item 演算の強度軽減
+\item パイプライン最適化
+\item 定数の畳み込み
+\item 文字列の共有化
+\item 共通式/ループ不変式の削除
+\item 不要文の削除
+\item テールリカージョン最適化
+\end{itemize}
+この中でも「パイプライン最適化」は特に強力な機能を持っていて，
+\ref{sec:pipeline}章に示したプログラミング技法に基づいて
+ほぼ自動的に「コードの並び替え」を行います。
+
+次節から簡単なCコーディングを例にして，
+「コードの並び替え」がどのように行われているか見てみることにします。
+
+
+\subsection{コーリングシーケンス}
+
+まず実際のコードを見る前に，
+関数のコーリングシーケンスについて説明しておきます。
+
+\begin{description}
+
+\item[レジスタのアサイン]
+関数実行中のR0からR15までの各レジスタは以下のようにアサインされています。
+\begin{quote}\begin{tabular}{rl}
+\textbf{R0～R3：}  & ワーク用 \\
+\textbf{R4～R7：}  & 引数用(引数が4つ以内の場合) \\
+\textbf{R8～R14：} & Auto変数用 \\
+\textbf{R15：}     & フレームポインタ \\
+\end{tabular}\end{quote}
+\par このうちワーク用および引数用のレジスタは，
+関数の呼び出し前後で値の保証がされないので，
+関数を呼び出す場合はこれらのレジスタのうち
+使っているレジスタの値をあらかじめ退避しておかなければなりません。
+\par Auto変数用のレジスタは，
+「レジスタ変数」として明示して定義された変数についてこれらのレジスタを割り当てます。
+
+\item[引数と返り値]
+引数は，上述したように，4つ以下ならレジスタに割り当てられます。
+引数が4つ以上，あるいは引数が可変の場合はスタックに積まれます。
+引数がレジスタに入らない場合（浮動小数点値，構造体テーブル）もスタックに積まれます。
+\par 返り値は基本的にR0レジスタにセットされます。
+返り値がレジスタに入らない場合は返り値の情報はメモリに展開され，
+R0レジスタにはそのアドレスがセットされます。
+
+\end{description}
+
+
+\subsection{最適化の例1} \label{sec:exsample1}
+
+図\ref{fig:sum1.c}は，よく見るSUM値計算の関数です。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+int sum(int *tbl, int ct)
+{
+    register int    sum;
+
+    sum = 0;
+    for(; ct>0; ct--, tbl++) {
+        sum += (*tbl);
+    }
+    return(sum);
+}
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum1.c}} \label{fig:sum1.c}
+\end{figure}
+
+この一見何のひねりもないソースを最適化なしでアセンブラソースにコンパイルすると，
+図\ref{fig:sum1.src}のようになります。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_sum:                            ; function: sum
+                                 ; frame size=12
+          MOV.L       R14,@-R15
+          ADD         #-8,R15
+          MOV.L       R4,@(4,R15)
+          MOV.L       R5,@R15
+          MOV         #0,R14
+          BRA         L219
+          NOP
+L220:
+          MOV.L       @(4,R15),R2
+          MOV.L       @R2,R3
+          ADD         R3,R14
+          MOV.L       @R15,R2
+          ADD         #-1,R2
+          MOV.L       R2,@R15
+          MOV.L       @(4,R15),R3
+          ADD         #4,R3
+          MOV.L       R3,@(4,R15)
+L219:
+          MOV.L       @R15,R2
+          CMP/PL      R2
+          BT          L220
+          MOV         R14,R0
+          ADD         #8,R15
+          MOV.L       @R15+,R14
+          RTS
+          NOP
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum1.src（sum1.cのコンパイル結果：最適化なし）}} \label{fig:sum1.src}
+\end{figure}
+
+図\ref{fig:sum1.src}のソースの内容について細かく説明はしませんが，
+Cのコードに忠実にアセンブラコードが展開されているのが分かると思います。
+また引数をわざわざスタックに積んで，
+スタックに対し引数のアクセスを行っています。
+（「引数へのポインタへのアクセス」というのもあり得るので，
+機械的にこうしているだけなのかもしれませんが，
+この辺はちょっと納得いかない作りではあります。）
+
+図\ref{fig:sum1.c}を最適化オプションをつけてコンパイルしてみましょう。
+結果を図\ref{fig:sum1_op.src}に示します。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_sum:                            ; function: sum
+                                 ; frame size=0
+          CMP/PL      R5
+          BF/S        L219
+          MOV         #0,R6
+L220:
+          ADD         #-1,R5
+          MOV.L       @R4+,R2
+          CMP/PL      R5
+          BT/S        L220
+          ADD         R2,R6
+L219:
+          RTS
+          MOV         R6,R0
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum1.src（sum1.cのコンパイル結果：最適化あり）}} \label{fig:sum1_op.src}
+\end{figure}
+コード量が激減していることに驚かれるかもしれません。
+今回は以下に示す特徴的な最適化を行っています。
+
+\begin{enumerate}
+
+\item 引数の操作をレジスタで直接行っています。
+
+\item レジスタ変数がR6に割り当てられています。
+    レジスタ変数は通常R8からR14に割り当てられているのですが，
+    値を保証しないワーク用のレジスタが余っているため，
+    レジスタのアサインを自動的に変更したものと思われます。
+
+\item 遅延分岐を有効的に利用しています。
+    図\ref{fig:sum1.src}でジャンプ命令の直後に
+    やたらとNOPが挿入されているのに気づかれたでしょうか。
+    遅延分岐命令は高速に動作する半面，
+    直後の命令を同時に実行してしまう副作用があります。
+    （\ref{sec:pipeline}章では述べませんでしたが，
+    命令分岐時のこのような挙動は，
+    SHマイコンに限らず
+    RISCマイコンに一般的に見られる特徴です。）
+    図\ref{fig:sum1_op.src}では，
+    NOP命令を挿入することによるコードの冗長性を
+    命令の並び替えで回避しています。
+
+\end{enumerate}
+
+
+\clearpage
+\subsection{最適化の例2}
+
+図\ref{fig:sum1.c}を図\ref{fig:sum2.c}のように少し変形してみます。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+int sum(int *tbl, int ct)
+{
+    register int    *p, i;
+    register int    a, b, sum;
+
+    p = tbl;
+    sum = 0;
+    a = (*p);
+    for(i=(ct-1), p++; i>0; i--, p++) {
+        b = (*p);
+        sum += a;
+        a = b;
+    }
+    sum += a;
+    return(sum);
+}
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum2.c}} \label{fig:sum2.c}
+\end{figure}
+
+図\ref{fig:sum2.c}は「ソフトウェアパイプライン」と呼ばれる技法で，
+ロード命令の直後にディスティネーションレジスタを使わないように
+意図的に並べ替えを行っています。
+また，\ref{sec:exsample1}章で分かったように，
+最適化を行わない状態では，引数をスタックに展開してしまうので，
+これらの変数も強引にレジスタ変数として再定義してみました。
+
+このソースに対し最適化を行わずにコンパイルした結果が図\ref{fig:sum2.src}です。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_sum:                            ; function: sum
+                                 ; frame size=28
+          MOV.L       R14,@-R15
+          MOV.L       R13,@-R15
+          MOV.L       R12,@-R15
+          MOV.L       R11,@-R15
+          MOV.L       R10,@-R15
+          ADD         #-8,R15
+          MOV.L       R4,@(4,R15)
+          MOV.L       R5,@R15
+          MOV.L       @(4,R15),R14
+          MOV         #0,R10
+          MOV.L       @R14,R12
+          MOV.L       @R15,R13
+          ADD         #-1,R13
+          ADD         #4,R14
+          BRA         L223
+          NOP
+L224:
+          MOV.L       @R14,R11
+          ADD         R12,R10
+          MOV         R11,R12
+          ADD         #-1,R13
+          ADD         #4,R14
+L223:
+          CMP/PL      R13
+          BT          L224
+          ADD         R12,R10
+          MOV         R10,R0
+          BRA         L225
+          NOP
+L225:
+          ADD         #8,R15
+          MOV.L       @R15+,R10
+          MOV.L       @R15+,R11
+          MOV.L       @R15+,R12
+          MOV.L       @R15+,R13
+          MOV.L       @R15+,R14
+          RTS
+          NOP
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum2.src（sum2.cのコンパイル結果：最適化なし）}} \label{fig:sum2.src}
+\end{figure}
+そして，最適化を行った場合を図\ref{fig:sum2_op.src}に示します。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_sum:                            ; function: sum
+                                 ; frame size=0
+          MOV         #0,R1
+          MOV         R5,R6
+          ADD         #-1,R6
+          CMP/PL      R6
+          BF/S        L223
+          MOV.L       @R4+,R7
+L224:
+          MOV.L       @R4+,R5
+          ADD         R7,R1
+          ADD         #-1,R6
+          CMP/PL      R6
+          BT/S        L224
+          MOV         R5,R7
+L223:
+          ADD         R7,R1
+          RTS
+          MOV         R1,R0
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum2.src（sum2.cのコンパイル結果：最適化あり）}} \label{fig:sum2_op.src}
+\end{figure}
+
+図\ref{fig:sum2.src}は図\ref{fig:sum1.src}に比べてループ内の処理がかなりすっきりしました。
+その分前後の処理が肥大化しています。
+アクセスするテーブルのサイズによっては，かなり非効率なコードになりそうです。
+
+図\ref{fig:sum2_op.src}を見てみます。
+一見「ソフトウェアパイプライン」というこちらの意図は達成されているようにみえます。
+しかし図\ref{fig:sum1_op.src}をよく見てみると
+実はこのコードでも遅延スロットは発生しないということがわかると思います。
+
+デバッグ時はあまり最適化をしないものなので，この技法はある程度有効かもしれませんが，
+コンパイラの性能を考えればこういったトリッキーなコーディングは
+「大きなお世話」なのかもしれません。
+
+
+\clearpage
+\subsection{最適化の例3}
+
+図\ref{fig:sum1.c}を違う形で変形してみます。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+int sum(int *tbl, int ct)
+{
+    int sum, i;
+
+    sum = 0;
+    for(i=ct>>2; i>0; i--, tbl+=4) {
+        sum += tbl[0];
+        sum += tbl[1];
+        sum += tbl[2];
+        sum += tbl[3];
+    }
+    for(i=ct&3; i>0; i--, tbl++) {
+        sum += (*tbl);
+    }
+    return(sum);
+}
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum3.c}} \label{fig:sum3.c}
+\end{figure}
+この図\ref{fig:sum3.c}のコードは一見冗長にみえますが，
+RISCマイコンは分岐処理があると実行効率が低下してしまうため，
+ループ回数を減らして処理全体を高速化できるようにしています。
+
+図\ref{fig:sum3.c}を最適化してコンパイルしたのが
+図\ref{fig:sum3_op.src}です。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_sum:                            ; function: sum
+                                 ; frame size=0
+          MOV         R5,R7
+          SHAR        R7
+          SHAR        R7
+          CMP/PL      R7
+          BF/S        L221
+          MOV         #0,R6
+L222:
+          MOV.L       @R4,R2
+          ADD         #-1,R7
+          MOV.L       @(4,R4),R3
+          ADD         R2,R6
+          MOV.L       @(8,R4),R2
+          CMP/PL      R7
+          ADD         R3,R6
+          ADD         R2,R6
+          MOV.L       @(12,R4),R3
+          ADD         R3,R6
+          BT/S        L222
+          ADD         #16,R4
+L221:
+          MOV         #3,R7
+          AND         R5,R7
+          CMP/PL      R7
+          BF          L223
+L224:
+          MOV.L       @R4+,R2
+          ADD         #-1,R7
+          CMP/PL      R7
+          BT/S        L224
+          ADD         R2,R6
+L223:
+          RTS
+          MOV         R6,R0
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum3.src（sum3.cのコンパイル結果：最適化あり）}} \label{fig:sum3_op.src}
+\end{figure}
+図\ref{fig:sum1_op.src}に比べるとコード量は増加していますが，
+ループ回数が少ないため，
+テーブルが充分大きければ
+全体として高速な動作が期待できます。
+
+
+ところで，図\ref{fig:sum3.c}のコードは，
+さらに図\ref{fig:sum3b.c}のように変形させることができます。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+int sum(int *tbl, int ct)
+{
+    int sum, i;
+
+    sum = 0;
+    for(i=ct>>1; i>0; i--) {
+        sum += (*tbl++);
+        sum += (*tbl++);
+    }
+    if((ct&1)!=0) {
+        sum += (*tbl);
+    }
+    return(sum);
+}
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum3b.c}} \label{fig:sum3b.c}
+\end{figure}
+このコードをコンパイルしたものが図\ref{fig:sum3b_op.src}です。
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_sum:                            ; function: sum
+                                 ; frame size=0
+          MOV         R5,R7
+          SHAR        R7
+          CMP/PL      R7
+          BF/S        L221
+          MOV         #0,R6
+L222:
+          ADD         #-1,R7
+          MOV.L       @R4+,R3
+          CMP/PL      R7
+          ADD         R3,R6
+          MOV.L       @R4+,R3
+          BT/S        L222
+          ADD         R3,R6
+L221:
+          MOV         #1,R3
+          TST         R3,R5
+          BT          L223
+          MOV.L       @R4,R1
+          ADD         R1,R6
+L223:
+          RTS
+          MOV         R6,R0
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{sum3b.src（sum3b.cのコンパイル結果：最適化あり）}} \label{fig:sum3b_op.src}
+\end{figure}
+本当はループ回数を$1/4$にしたかった（「4でアンロールする」といいます）のですが，
+スロットのスプリットがひんぱんに発生するため実際にはあまり効率が良くないようです。
+（どういうコードになるか是非試してみてください。
+これも何だか納得がいかないような気がしますが，きっと何か意味があるのでしょう。）
+図\ref{fig:sum3.c}とどちらがいいかは微妙なところです。
+要素数によって使い分けるのもいいかもしれません。
+
+
+\clearpage
+\subsection{最適化で気をつけること}
+
+最適化は非常に便利で強力な機能ですが，
+いいかげんなコーディングに対しては予想外のコードを吐き出してしまう副作用も
+内包しています。
+
+以下に，最適化を行う際に注意すべき点についていくつか紹介します。
+
+\begin{description}
+
+\item[ロード/ストア命令について]
+この章で紹介したいくつかのソースを見てもらうと気づくかもしれませんが，
+Cソースで記述しているロード/ストア命令については
+基本的にコードの並べ替えを行わないようです。
+単なるメモリアクセスならまだしも，
+ペリフェラルの設定等の部分でポートアクセスなどを勝手に並べ替えられては
+困ることがおきますので，
+この辺の処理は概ね妥当といえます。
+\par なお，ポートやレジスタへのアクセスについては，
+\texttt{volatile}型宣言を使用することをお薦めします。
+例えば，汎用ポートAを以下のように宣言します。
+\begin{screen}\begin{verbatim}
+#define PADRH   ((volatile u_short *)0xffff8380)
+\end{verbatim}\end{screen}
+
+\item[ループ処理について]
+SHCコンパイラに限らないのですが，
+ループは最適化の標的になりやすい処理です。
+\par 例えば，以下の関数マクロを作成したとします。
+\begin{screen}\begin{verbatim}
+#define DELAY(x)    {int i; for(i=0; i<x; i++);}   /* Delay */
+\end{verbatim}\end{screen}
+単純な時間稼ぎのためのこのようなループ処理は皆さんもよく使われるのではにのでしょうか。
+しかし，このループ処理は完全にこの系内で閉じていて
+他のコードに影響を及ぼさないため，
+最適化オプションによっては，この処理自体が削除される可能性があります。
+\par これを防ぐためには，上記の例では以下のように宣言しておきます。
+\begin{screen}\begin{verbatim}
+#define DELAY(x)    {volatile int i; for(i=0; i<x; i++);}   /* Delay */
+\end{verbatim}\end{screen}
+\texttt{volatile}型宣言は，先程も出てきましたが，
+意図的に最適化の対象から逃れられる効果をもっています。
+多用は禁物です。
+
+\item[関数呼出しについて]
+呼び出す関数が同一ファイルの場合，
+\texttt{BSR}\,インストラクションを使った高速な関数呼出しにできる場合があります。
+（図\ref{fig:call1.c}，図\ref{fig:call1.src}\,参照）
+また処理の最後に関数を呼び出した場合，
+「テールリカージョン」最適化により関数戻り時のオーバヘッドを抑えることができます。
+（図\ref{fig:call2.c}，図\ref{fig:call2.src}\,参照）
+
+\end{description}
+
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+void    func(int *sum, int *tbl, int ct)
+{
+    register int    s;
+
+    s = 0;
+    for(; ct>0; ct--, tbl++) {
+        s += (*tbl);
+    }
+    (*sum) = s;
+    return;
+}
+int sum(int *tbl, int ct)
+{
+    int sum;
+
+    func(&sum, tbl, ct);
+    return(sum);
+}
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{call1.c}} \label{fig:call1.c}
+\end{figure}
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _func
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_func:                           ; function: func
+                                 ; frame size=0
+          CMP/PL      R6
+          BF/S        L225
+          MOV         #0,R7
+L226:
+          ADD         #-1,R6
+          MOV.L       @R5+,R2
+          CMP/PL      R6
+          BT/S        L226
+          ADD         R2,R7
+L225:
+          RTS
+          MOV.L       R7,@R4
+_sum:                            ; function: sum
+                                 ; frame size=16
+          STS.L       PR,@-R15
+          MOV         R5,R6
+          ADD         #-12,R15
+          MOV.L       R4,@(4,R15)
+          MOV.L       R5,@(8,R15)
+          MOV.L       @(4,R15),R5
+          BSR         _func
+          MOV         R15,R4
+          MOV.L       @R15,R0
+          ADD         #12,R15
+          LDS.L       @R15+,PR
+          RTS
+          NOP
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{call1.src（call1.cのコンパイル結果：最適化あり）}} \label{fig:call1.src}
+\end{figure}
+
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+int func(int *tbl, int ct)
+{
+    register int    s;
+
+    s = 0;
+    for(; ct>0; ct--, tbl++) {
+        s += (*tbl);
+    }
+    return(s);
+}
+int sum(int *tbl, int ct)
+{
+    return(func(tbl, ct));
+}
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{call2.c}} \label{fig:call2.c}
+\end{figure}
+\begin{figure}[tpb]
+\begin{boxnote}
+{\small\begin{verbatim}
+          .EXPORT     _func
+          .EXPORT     _sum
+          .SECTION    P,CODE,ALIGN=4
+_func:                           ; function: func
+                                 ; frame size=0
+          CMP/PL      R5
+          BF/S        L223
+          MOV         #0,R6
+L224:
+          ADD         #-1,R5
+          MOV.L       @R4+,R2
+          CMP/PL      R5
+          BT/S        L224
+          ADD         R2,R6
+L223:
+          RTS
+          MOV         R6,R0
+_sum:                            ; function: sum
+                                 ; frame size=0
+          BRA         _func
+          NOP
+\end{verbatim}}
+\end{boxnote}
+\caption{\texttt{call2.src（call2.cのコンパイル結果：最適化あり）}} \label{fig:call2.src}
+\end{figure}
+
+
+\clearpage
+\section{最後に（コーディングテクニック一覧）}
+
+今まで述べてきたことを以下にまとめてみました。
+
+\begin{enumerate}
+\item プロトタイピングは必ず行います。
+\item 算術式および論理式に注意します。冗長な記述で不具合等を回避できる場合があります。
+\item コンパイル時の最適化処理により，パイプラインの乱れを最小限に抑えることができます。
+\item トリッキーなコーディングはかえって処理効率を下げる可能性があります。
+\item \texttt{volatile}型宣言をうまく使って最適化処理をコントロールします。
+\item 関数の引数は4つ以下になるようにします。
+    また返り値も32bitサイズ以下になるように工夫します。
+\item 頻繁に呼び出す関数を1つのファイルにまとめることにより処理効率を上げることができます。
+\end{enumerate}
+
+また，上記以外にもコーディング上のテクニックがあります。
+以下にいくつか紹介します。
+（文献\cite{SH:MANUAL:CCompiler}\,でも詳しく紹介されています。
+こちらもぜひ参考にしてみてください。）
+
+\begin{enumerate}
+\item 乗算を行う際，データサイズを 2 byte 以下にしておくと処理速度が向上します。
+    これは特にターゲットがSH-1の場合に有効です。
+\item イミディエイト値を 1 byte 以下にすると，
+    データがコード内に埋めこまれるため処理効率が向上します。
+\item \texttt{switch}\,文は一般的に効率が悪いため，
+    \texttt{if}\,文や（分岐が少ない場合）関数テーブル（処理が似ている場合）で
+    置き換えられないかどうか検討すべきです。
+\item 数値比較をする場合，0で比較するようにすると処理効率が向上します。
+\end{enumerate}
+
+今回はSHマイコン特有と思われるコーディングテクニックについて紹介しました。
+現在マイコンプログラムでもCやC++言語が使えるようになり
+開発効率は著しく向上しましたが，
+本当に効率的なコードにするためには小手先のテクニックが必要となります。
+皆さんが実際にSHマイコンでシステムを組む際に，
+このレポートが少しでもお役に立てれば幸いです。
+
+
+\clearpage
+\bibliographystyle{jplain}
+\bibliography{ProgSH}
+
+
+\end{document}

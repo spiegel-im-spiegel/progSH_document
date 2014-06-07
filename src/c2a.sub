@@ -1,0 +1,15 @@
+-message
+-sjis
+-string=const
+-macsave=0
+-listfile
+-show=(source,object,width=0,length=0)
+-cpu=sh2
+-section=(program=P,const=C,data=D,bss=B)
+-division=cpu
+-endian=big
+-pic=0
+-code=asmcode
+-optimize=0
+-nodebug
+-inline=10
